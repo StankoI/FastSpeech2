@@ -87,3 +87,13 @@ def english_cleaners(text):
     text = expand_abbreviations(text)
     text = collapse_whitespace(text)
     return text
+
+
+def bulgarian_cleaners(text):
+    '''Pipeline for Bulgarian. Only lowercases and collapses whitespace; it must
+    NOT transliterate to ASCII (that would destroy Cyrillic). Heavy text
+    normalisation (number expansion, foreign-char dropping, repeat collapsing)
+    is handled upstream in text/bulgarian.py.'''
+    text = lowercase(text)
+    text = collapse_whitespace(text)
+    return text
