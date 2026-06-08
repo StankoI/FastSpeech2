@@ -1,78 +1,31 @@
-import re
 import argparse
-from string import punctuation
 
 import torch
 import yaml
 import numpy as np
 from torch.utils.data import DataLoader
-from g2p_en import G2p
-from pypinyin import pinyin, Style
 
 from utils.model import get_model, get_vocoder
 from utils.tools import to_device, synth_samples
 from dataset import TextDataset
 from text import text_to_sequence
+from text.bulgarian import normalize_text, word_to_phonemes
+from num2wordBg import text_numbers_to_words
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-def read_lexicon(lex_path):
-    lexicon = {}
-    with open(lex_path) as f:
-        for line in f:
-            temp = re.split(r"\s+", line.strip("\n"))
-            word = temp[0]
-            phones = temp[1:]
-            if word.lower() not in lexicon:
-                lexicon[word.lower()] = phones
-    return lexicon
-
-
-def preprocess_english(text, preprocess_config):
-    text = text.rstrip(punctuation)
-    lexicon = read_lexicon(preprocess_config["path"]["lexicon_path"])
-
-    g2p = G2p()
-    phones = []
-    words = re.split(r"([,;.\-\?\!\s+])", text)
-    for w in words:
-        if w.lower() in lexicon:
-            phones += lexicon[w.lower()]
-        else:
-            phones += list(filter(lambda p: p != " ", g2p(w)))
-    phones = "{" + "}{".join(phones) + "}"
-    phones = re.sub(r"\{[^\w\s]?\}", "{sp}", phones)
-    phones = phones.replace("}{", " ")
-
-    print("Raw Text Sequence: {}".format(text))
-    print("Phoneme Sequence: {}".format(phones))
-    sequence = np.array(
-        text_to_sequence(
-            phones, preprocess_config["preprocessing"]["text"]["text_cleaners"]
-        )
-    )
-
-    return np.array(sequence)
-
-
-def preprocess_mandarin(text, preprocess_config):
-    lexicon = read_lexicon(preprocess_config["path"]["lexicon_path"])
+def preprocess_bulgarian(text, preprocess_config):
+    # Same grapheme pipeline as training: expand numbers, normalise to Bulgarian
+    # words, then split each word into its letter tokens.
+    text = text_numbers_to_words(text)
+    text = normalize_text(text)
 
     phones = []
-    pinyins = [
-        p[0]
-        for p in pinyin(
-            text, style=Style.TONE3, strict=False, neutral_tone_with_five=True
-        )
-    ]
-    for p in pinyins:
-        if p in lexicon:
-            phones += lexicon[p]
-        else:
-            phones.append("sp")
-
+    for word in text.split():
+        phones += word_to_phonemes(word)
     phones = "{" + " ".join(phones) + "}"
+
     print("Raw Text Sequence: {}".format(text))
     print("Phoneme Sequence: {}".format(phones))
     sequence = np.array(
@@ -202,10 +155,14 @@ if __name__ == "__main__":
     if args.mode == "single":
         ids = raw_texts = [args.text[:100]]
         speakers = np.array([args.speaker_id])
-        if preprocess_config["preprocessing"]["text"]["language"] == "en":
-            texts = np.array([preprocess_english(args.text, preprocess_config)])
-        elif preprocess_config["preprocessing"]["text"]["language"] == "zh":
-            texts = np.array([preprocess_mandarin(args.text, preprocess_config)])
+        if preprocess_config["preprocessing"]["text"]["language"] == "bg":
+            texts = np.array([preprocess_bulgarian(args.text, preprocess_config)])
+        else:
+            raise ValueError(
+                "Unsupported language '{}'; only 'bg' is configured.".format(
+                    preprocess_config["preprocessing"]["text"]["language"]
+                )
+            )
         text_lens = np.array([len(texts[0])])
         batchs = [(ids, raw_texts, speakers, texts, text_lens, max(text_lens))]
 

@@ -1,11 +1,13 @@
-""" from https://github.com/keithito/tacotron """
+""" adapted from https://github.com/keithito/tacotron """
 
 """
 Defines the set of symbols used in text input to the model.
 
-The default is a set of ASCII characters that works well for English or text that has been run through Unidecode. For other data, you can modify _characters. See TRAINING_DATA.md for details. """
+For Bulgarian we use grapheme tokens: one token per Cyrillic letter, prefixed
+with "@" to match the curly-brace path in text/__init__.py. See text/bulgarian.py.
+"""
 
-from text import cmudict, pinyin, bulgarian
+from text import bulgarian
 
 _pad = "_"
 _punctuation = "!'(),.:;? "
@@ -13,9 +15,6 @@ _special = "-"
 _letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 _silences = ["@sp", "@spn", "@sil"]
 
-# Prepend "@" to ARPAbet symbols to ensure uniqueness (some are the same as uppercase letters):
-_arpabet = ["@" + s for s in cmudict.valid_symbols]
-_pinyin = ["@" + s for s in pinyin.valid_symbols]
 # Bulgarian graphemes (each Cyrillic letter is a token); see text/bulgarian.py.
 _bulgarian = ["@" + s for s in bulgarian.BG_ALPHABET]
 
@@ -25,8 +24,6 @@ symbols = (
     + list(_special)
     + list(_punctuation)
     + list(_letters)
-    + _arpabet
-    + _pinyin
     + _bulgarian
     + _silences
 )
