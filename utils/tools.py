@@ -5,11 +5,10 @@ import torch
 import torch.nn.functional as F
 import numpy as np
 import matplotlib
+
+matplotlib.use("Agg")  # must precede the pyplot import (Colab subprocesses inherit an inline backend)
 from scipy.io import wavfile
 from matplotlib import pyplot as plt
-
-
-matplotlib.use("Agg")
 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
