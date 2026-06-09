@@ -26,6 +26,7 @@ def get_model(args, configs, device, train=False):
         )
         if args.restore_step:
             scheduled_optim.load_state_dict(ckpt["optimizer"])
+            scheduled_optim.load_plateau_state(ckpt.get("lr_plateau"))
         model.train()
         return model, scheduled_optim
 

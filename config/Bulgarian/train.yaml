@@ -3,15 +3,23 @@ path:
   log_path: "./output/log/Bulgarian"
   result_path: "./output/result/Bulgarian"
 optimizer:
-  batch_size: 16
+  batch_size: 48
   betas: [0.9, 0.98]
   eps: 0.000000001
   weight_decay: 0.0
   grad_clip_thresh: 1.0
   grad_acc_step: 1
-  warm_up_step: 4000
+  warm_up_step: 5000
   anneal_steps: [300000, 400000, 500000]
   anneal_rate: 0.3
+  # Loss-aware LR reduction (on top of the Noam decay): when the validation loss
+  # has not improved for `plateau_patience` checks (each val_step), multiply the
+  # LR by `plateau_factor`, down to a floor of `plateau_min_scale` x the schedule.
+  plateau_enabled: True
+  plateau_factor: 0.5
+  plateau_patience: 5
+  plateau_min_delta: 0.0
+  plateau_min_scale: 0.01
 step:
   total_step: 300000
   log_step: 100

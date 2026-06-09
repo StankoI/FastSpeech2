@@ -54,6 +54,8 @@ def evaluate(model, step, configs, logger=None, vocoder=None):
         *([step] + [l for l in loss_means])
     )
 
+    val_loss = loss_means[0]
+
     if logger is not None:
         fig, wav_reconstruction, wav_prediction, tag = synth_one_sample(
             batch,
@@ -83,7 +85,7 @@ def evaluate(model, step, configs, logger=None, vocoder=None):
             tag="Validation/step_{}_{}_synthesized".format(step, tag),
         )
 
-    return message
+    return message, val_loss
 
 
 if __name__ == "__main__":
@@ -116,5 +118,5 @@ if __name__ == "__main__":
     # Get model
     model = get_model(args, configs, device, train=False).to(device)
 
-    message = evaluate(model, args.restore_step, configs)
+    message, _ = evaluate(model, args.restore_step, configs)
     print(message)

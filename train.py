@@ -109,6 +109,9 @@ def main(args, configs):
                     outer_bar.write(message1 + message2)
 
                     log(train_logger, step, losses=losses)
+                    train_logger.add_scalar(
+                        "Training/learning_rate", optimizer.get_lr(), step
+                    )
 
                 if step % synth_step == 0:
                     fig, wav_reconstruction, wav_prediction, tag = synth_one_sample(
@@ -141,10 +144,15 @@ def main(args, configs):
 
                 if step % val_step == 0:
                     model.eval()
-                    message = evaluate(model, step, configs, val_logger, vocoder)
+                    message, val_loss = evaluate(
+                        model, step, configs, val_logger, vocoder
+                    )
                     with open(os.path.join(val_log_path, "log.txt"), "a") as f:
                         f.write(message + "\n")
                     outer_bar.write(message)
+
+                    # Loss-aware LR reduction: lower LR if val loss has stalled
+                    optimizer.register_val_loss(val_loss)
 
                     model.train()
 
@@ -153,6 +161,7 @@ def main(args, configs):
                         {
                             "model": model.module.state_dict(),
                             "optimizer": optimizer._optimizer.state_dict(),
+                            "lr_plateau": optimizer.get_plateau_state(),
                         },
                         os.path.join(
                             train_config["path"]["ckpt_path"],
