@@ -59,6 +59,7 @@ class MultiHeadAttention(nn.Module):
 
 class PositionwiseFeedForward(nn.Module):
     """ A two-feed-forward-layer module """
+    #uses conv1D layers instead of normal linear because it helps capture local dependancies
 
     def __init__(self, d_in, d_hid, kernel_size, dropout=0.1):
         super().__init__()
