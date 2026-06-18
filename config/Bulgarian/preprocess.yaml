@@ -8,7 +8,7 @@ path:
   preprocessed_path: "./preprocessed_data/Bulgarian"
 
 preprocessing:
-  val_size: 50
+  val_size: 500
   text:
     text_cleaners: ["bulgarian_cleaners"]
     language: "bg"

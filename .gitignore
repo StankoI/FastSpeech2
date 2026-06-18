@@ -121,3 +121,6 @@ hifigan/*.pth.tar
 /Euthymius
 Euthymius.zip
 RealData/
+testSplit/filelists.zip
+testSplit/filelists
+/local_samples
