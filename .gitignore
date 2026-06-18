@@ -120,3 +120,4 @@ hifigan/*.pth.tar
 #dataset
 /Euthymius
 Euthymius.zip
+RealData/
