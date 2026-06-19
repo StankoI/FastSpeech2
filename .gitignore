@@ -124,3 +124,11 @@ RealData/
 testSplit/filelists.zip
 testSplit/filelists
 /local_samples
+mfa_corpus
+_bk
+bg_acoustic_model.zip
+mfa_train
+mfa_chunk
+mfa_chunk_out
+mfa_local_out
+filelists

@@ -15,7 +15,7 @@ optimizer:
   # Loss-aware LR reduction (on top of the Noam decay): when the validation loss
   # has not improved for `plateau_patience` checks (each val_step), multiply the
   # LR by `plateau_factor`, down to a floor of `plateau_min_scale` x the schedule.
-  plateau_enabled: True
+  plateau_enabled: False
   plateau_factor: 0.5
   plateau_patience: 5
   plateau_min_delta: 0.0
