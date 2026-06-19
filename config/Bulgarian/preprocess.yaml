@@ -1,9 +1,9 @@
 dataset: "Bulgarian"
 
 path:
-  corpus_path: "."                                   # base for relative wav paths in the manifest
-  manifest_path: "./filelists/euthymius_clean.csv"   # produced by clean_dataset.py
-  lexicon_path: "lexicon/bulgarian-grapheme.txt"     # produced by generate_bg_dict.py
+  corpus_path: "RealData/merged_dataset"                 # base for relative wav paths in the manifest
+  manifest_path: "RealData/merged_dataset/manifest.csv"  # single source of truth (id|wav_path|text)
+  lexicon_path: "lexicon/dictionary_full.txt"            # produced by generate_bg_dict.py (from manifest)
   raw_path: "./raw_data/Bulgarian"
   preprocessed_path: "./preprocessed_data/Bulgarian"
 

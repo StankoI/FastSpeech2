@@ -22,7 +22,7 @@ variance_embedding:
 
 multi_speaker: False
 
-max_seq_len: 1400
+max_seq_len: 1500
 
 vocoder:
   model: "HiFi-GAN" # support 'HiFi-GAN', 'MelGAN'

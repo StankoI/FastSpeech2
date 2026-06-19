@@ -132,3 +132,9 @@ mfa_chunk
 mfa_chunk_out
 mfa_local_out
 filelists
+
+# local MFA / synthesis workflow
+mfa_work
+preprocessed_data/
+*.local.yaml
+mfa_corpus_real
