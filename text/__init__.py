@@ -1,75 +1,69 @@
-""" from https://github.com/keithito/tacotron """
+"""Text/phone conversion with strict validation for phoneme sequences."""
+
 import re
+import unicodedata
+
 from text import cleaners
 from text.symbols import symbols
 
 
-# Mappings from symbol to numeric ID and vice versa:
-_symbol_to_id = {s: i for i, s in enumerate(symbols)}
-_id_to_symbol = {i: s for i, s in enumerate(symbols)}
-
-# Regular expression matching text enclosed in curly braces:
-_curly_re = re.compile(r"(.*?)\{(.+?)\}(.*)")
+_symbol_to_id = {symbol: index for index, symbol in enumerate(symbols)}
+_id_to_symbol = {index: symbol for index, symbol in enumerate(symbols)}
+_curly_re = re.compile(r"(.*?)\{(.*?)\}(.*)")
 
 
 def text_to_sequence(text, cleaner_names):
-    """Converts a string of text to a sequence of IDs corresponding to the symbols in the text.
-
-    The text can optionally have ARPAbet sequences enclosed in curly braces embedded
-    in it. For example, "Turn left on {HH AW1 S S T AH0 N} Street."
-
-    Args:
-      text: string to convert to a sequence
-      cleaner_names: names of the cleaner functions to run the text through
-
-    Returns:
-      List of integers corresponding to the symbols in the text
-    """
+    """Convert text to IDs; braced phone sequences are validated strictly."""
     sequence = []
-
-    # Check for curly braces and treat their contents as ARPAbet:
-    while len(text):
-        m = _curly_re.match(text)
-
-        if not m:
+    while text:
+        match = _curly_re.match(text)
+        if not match:
             sequence += _symbols_to_sequence(_clean_text(text, cleaner_names))
             break
-        sequence += _symbols_to_sequence(_clean_text(m.group(1), cleaner_names))
-        sequence += _arpabet_to_sequence(m.group(2))
-        text = m.group(3)
-
+        sequence += _symbols_to_sequence(_clean_text(match.group(1), cleaner_names))
+        sequence += phones_to_sequence(match.group(2))
+        text = match.group(3)
     return sequence
 
 
+def phones_to_sequence(phone_text):
+    """Convert whitespace-separated MFA phones to IDs or raise on any unknown."""
+    phones = [unicodedata.normalize("NFC", p) for p in phone_text.split()]
+    if not phones:
+        raise ValueError("Empty phoneme sequence is not valid FastSpeech2 input")
+
+    tagged = ["@" + phone for phone in phones]
+    unknown = [phone for phone, symbol in zip(phones, tagged) if symbol not in _symbol_to_id]
+    if unknown:
+        raise ValueError("Unknown MFA phone(s): {}".format(", ".join(sorted(set(unknown)))))
+    return [_symbol_to_id[symbol] for symbol in tagged]
+
+
 def sequence_to_text(sequence):
-    """Converts a sequence of IDs back to a string"""
     result = ""
     for symbol_id in sequence:
         if symbol_id in _id_to_symbol:
-            s = _id_to_symbol[symbol_id]
-            # Enclose ARPAbet back in curly braces:
-            if len(s) > 1 and s[0] == "@":
-                s = "{%s}" % s[1:]
-            result += s
+            symbol = _id_to_symbol[symbol_id]
+            if len(symbol) > 1 and symbol[0] == "@":
+                symbol = "{%s}" % symbol[1:]
+            result += symbol
     return result.replace("}{", " ")
 
 
 def _clean_text(text, cleaner_names):
     for name in cleaner_names:
-        cleaner = getattr(cleaners, name)
-        if not cleaner:
-            raise Exception("Unknown cleaner: %s" % name)
+        cleaner = getattr(cleaners, name, None)
+        if cleaner is None:
+            raise ValueError("Unknown cleaner: {}".format(name))
         text = cleaner(text)
     return text
 
 
-def _symbols_to_sequence(symbols):
-    return [_symbol_to_id[s] for s in symbols if _should_keep_symbol(s)]
-
-
-def _arpabet_to_sequence(text):
-    return _symbols_to_sequence(["@" + s for s in text.split()])
-
-
-def _should_keep_symbol(s):
-    return s in _symbol_to_id and s != "_" and s != "~"
+def _symbols_to_sequence(raw_symbols):
+    # Non-phone text is retained only for compatibility with the original API.
+    # Bulgarian train/inference data must use the braced strict path above.
+    return [
+        _symbol_to_id[symbol]
+        for symbol in raw_symbols
+        if symbol in _symbol_to_id and symbol not in {"_", "~"}
+    ]

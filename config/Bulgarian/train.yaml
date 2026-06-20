@@ -3,7 +3,10 @@ path:
   log_path: "./output/log/Bulgarian"
   result_path: "./output/result/Bulgarian"
 optimizer:
-  batch_size: 48
+  batch_size: 64
+  num_workers: 2
+  amp: True
+  amp_dtype: "bfloat16" # A100: native BF16; set amp False for CPU/debugging
   betas: [0.9, 0.98]
   eps: 0.000000001
   weight_decay: 0.0

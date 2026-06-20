@@ -39,6 +39,10 @@ class ScheduledOptim:
         self._update_learning_rate()
         self._optimizer.step()
 
+    def update_learning_rate(self):
+        """Advance the schedule without stepping (used by AMP GradScaler)."""
+        self._update_learning_rate()
+
     def zero_grad(self):
         self._optimizer.zero_grad()
 

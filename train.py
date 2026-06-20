@@ -14,8 +14,16 @@ from model import FastSpeech2Loss
 from dataset import Dataset
 
 from evaluate import evaluate
+from utils.pipeline import checkpoint_metadata
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+def atomic_torch_save(value, path):
+    """Do not leave a highest-numbered half-checkpoint after a disconnect."""
+    temporary = path + ".tmp"
+    torch.save(value, temporary)
+    os.replace(temporary, path)
 
 
 def main(args, configs):
@@ -35,11 +43,14 @@ def main(args, configs):
         batch_size=batch_size * group_size,
         shuffle=True,
         collate_fn=dataset.collate_fn,
+        num_workers=train_config["optimizer"].get("num_workers", 0),
+        persistent_workers=train_config["optimizer"].get("num_workers", 0) > 0,
     )
 
     # Prepare model
     model, optimizer = get_model(args, configs, device, train=True)
-    model = nn.DataParallel(model)
+    if torch.cuda.device_count() > 1:
+        model = nn.DataParallel(model)
     num_param = get_param_num(model)
     Loss = FastSpeech2Loss(preprocess_config, model_config).to(device)
     print("Number of FastSpeech2 Parameters:", num_param)
@@ -67,6 +78,15 @@ def main(args, configs):
     save_step = train_config["step"]["save_step"]
     synth_step = train_config["step"]["synth_step"]
     val_step = train_config["step"]["val_step"]
+    amp_enabled = bool(
+        train_config["optimizer"].get("amp", False) and device.type == "cuda"
+    )
+    amp_name = train_config["optimizer"].get("amp_dtype", "bfloat16")
+    amp_dtype = torch.bfloat16 if amp_name == "bfloat16" else torch.float16
+    scaler = torch.cuda.amp.GradScaler(
+        enabled=amp_enabled and amp_dtype == torch.float16
+    )
+    print("Mixed precision:", amp_enabled, amp_name if amp_enabled else "disabled")
 
     outer_bar = tqdm(total=total_step, desc="Training", position=0)
     outer_bar.n = args.restore_step
@@ -79,21 +99,33 @@ def main(args, configs):
                 batch = to_device(batch, device)
 
                 # Forward
-                output = model(*(batch[2:]))
+                with torch.autocast(
+                    device_type=device.type,
+                    dtype=amp_dtype,
+                    enabled=amp_enabled,
+                ):
+                    output = model(*(batch[2:]))
 
-                # Cal Loss
-                losses = Loss(batch, output)
-                total_loss = losses[0]
+                    # Cal Loss
+                    losses = Loss(batch, output)
+                    total_loss = losses[0]
 
                 # Backward
                 total_loss = total_loss / grad_acc_step
-                total_loss.backward()
+                scaler.scale(total_loss).backward()
                 if step % grad_acc_step == 0:
                     # Clipping gradients to avoid gradient explosion
+                    if scaler.is_enabled():
+                        scaler.unscale_(optimizer._optimizer)
                     nn.utils.clip_grad_norm_(model.parameters(), grad_clip_thresh)
 
                     # Update weights
-                    optimizer.step_and_update_lr()
+                    if scaler.is_enabled():
+                        optimizer.update_learning_rate()
+                        scaler.step(optimizer._optimizer)
+                        scaler.update()
+                    else:
+                        optimizer.step_and_update_lr()
                     optimizer.zero_grad()
 
                 if step % log_step == 0:
@@ -157,16 +189,24 @@ def main(args, configs):
                     model.train()
 
                 if step % save_step == 0:
-                    torch.save(
+                    checkpoint_path = os.path.join(
+                        train_config["path"]["ckpt_path"],
+                        "{}.pth.tar".format(step),
+                    )
+                    atomic_torch_save(
                         {
-                            "model": model.module.state_dict(),
+                            "model": (
+                                model.module.state_dict()
+                                if isinstance(model, nn.DataParallel)
+                                else model.state_dict()
+                            ),
                             "optimizer": optimizer._optimizer.state_dict(),
                             "lr_plateau": optimizer.get_plateau_state(),
+                            "pipeline": checkpoint_metadata(
+                                preprocess_config, model_config
+                            ),
                         },
-                        os.path.join(
-                            train_config["path"]["ckpt_path"],
-                            "{}.pth.tar".format(step),
-                        ),
+                        checkpoint_path,
                     )
 
                 if step == total_step:

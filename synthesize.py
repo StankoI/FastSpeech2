@@ -1,4 +1,5 @@
 import argparse
+import json
 
 import torch
 import yaml
@@ -9,32 +10,207 @@ from utils.model import get_model, get_vocoder
 from utils.tools import to_device, synth_samples
 from dataset import TextDataset
 from text import text_to_sequence
-from text.bulgarian import normalize_text, word_to_phonemes
-from num2wordBg import text_numbers_to_words
+
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import tempfile
+
+from bulgarian_normalization import synthesis_segments
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-def preprocess_bulgarian(text, preprocess_config):
-    # Same grapheme pipeline as training: expand numbers, normalise to Bulgarian
-    # words, then split each word into its letter tokens.
-    text = text_numbers_to_words(text)
-    text = normalize_text(text)
+def _parse_mfa_dictionary_line(line):
+    """
+    MFA dictionary lines are usually:
+        WORD<TAB>PHONE PHONE PHONE
+    or with probabilities:
+        WORD<TAB>PROB<TAB>PHONE PHONE PHONE
+    """
+    line = line.strip()
+    if not line:
+        return None, None
 
-    phones = []
-    for word in text.split():
-        phones += word_to_phonemes(word)
-    phones = "{" + " ".join(phones) + "}"
+    parts = line.split("\t")
 
-    print("Raw Text Sequence: {}".format(text))
+    if len(parts) >= 3:
+        word = parts[0].strip()
+        phones = parts[-1].strip().split()
+        return word, phones
+
+    if len(parts) == 2:
+        word = parts[0].strip()
+        phones = parts[1].strip().split()
+        return word, phones
+
+    # Fallback for whitespace-separated output.
+    pieces = line.split()
+    if len(pieces) >= 2:
+        return pieces[0], pieces[1:]
+
+    return None, None
+
+
+def _mfa_g2p_word_prons(words, g2p_model="bulgarian_mfa", mfa_cmd="mfa"):
+    """
+    Run MFA G2P over a unique word list and return:
+        {word: [phone1, phone2, ...]}
+
+    Requires:
+        mfa model download g2p bulgarian_mfa
+    """
+    unique_words = sorted(set(w for w in words if w.strip()))
+    if not unique_words:
+        return {}
+
+    with tempfile.TemporaryDirectory() as tmp:
+        in_path = os.path.join(tmp, "words.txt")
+        out_path = os.path.join(tmp, "g2p.dict")
+
+        with open(in_path, "w", encoding="utf-8") as f:
+            for w in unique_words:
+                f.write(w + "\n")
+
+        executable = shutil.which(mfa_cmd) if not os.path.isabs(mfa_cmd) else mfa_cmd
+        if not executable or not os.path.exists(executable):
+            raise RuntimeError(
+                "MFA executable {!r} was not found. Pass --mfa_cmd with the "
+                "executable inside your MFA conda environment.".format(mfa_cmd)
+            )
+        cmd = [executable, "g2p", in_path, g2p_model, out_path, "--clean", "--sorted"]
+        subprocess.run(cmd, check=True)
+
+        prons = {}
+        with open(out_path, encoding="utf-8") as f:
+            for line in f:
+                word, phones = _parse_mfa_dictionary_line(line)
+                if word and phones and word not in prons:
+                    prons[word] = phones
+
+    missing = [w for w in unique_words if w not in prons]
+    if missing:
+        raise RuntimeError(
+            "MFA G2P did not return pronunciations for: "
+            + ", ".join(missing[:30])
+        )
+
+    return prons
+
+
+def _load_runtime_lexicon(path):
+    """Load one deterministic pronunciation per word from a plain MFA lexicon."""
+    lexicon = {}
+    with open(path, encoding="utf-8") as handle:
+        for line in handle:
+            word, phones = _parse_mfa_dictionary_line(line)
+            if word and phones and word not in lexicon:
+                lexicon[word] = phones
+    if not lexicon:
+        raise RuntimeError("Runtime lexicon is empty: {}".format(path))
+    return lexicon
+
+
+def _load_g2p_cache(path):
+    if not path.is_file():
+        return {}
+    with open(path, encoding="utf-8") as handle:
+        data = json.load(handle)
+    return {word: list(phones) for word, phones in data.items()}
+
+
+def _save_g2p_cache(path, cache):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    with open(temporary, "w", encoding="utf-8") as handle:
+        json.dump(cache, handle, ensure_ascii=False, indent=2, sort_keys=True)
+    os.replace(temporary, path)
+
+
+def preprocess_bulgarian(
+    text,
+    preprocess_config,
+    g2p_model="bulgarian_mfa",
+    mfa_cmd="mfa",
+    runtime_lexicon=None,
+):
+    """
+    Convert Bulgarian input to the same MFA phone-token format used during training.
+
+    Accepted input:
+    1. Already-phonemized:
+        "{phone1 phone2 phone3}"
+
+    2. Raw Bulgarian text:
+        "Здравей, как си?"
+       This is normalized and sent through MFA G2P.
+    """
+    text = text.strip()
+
+    if text.startswith("{") and text.endswith("}"):
+        phones = text
+        normalized_text = text
+    else:
+        segments = synthesis_segments(text)
+        if not segments:
+            raise ValueError("Input is empty after Bulgarian normalization")
+        normalized_text = " ".join(words for words, _ in segments)
+        all_words = [word for words, _ in segments for word in words.split()]
+
+        lexicon_path = runtime_lexicon or preprocess_config["path"].get(
+            "runtime_lexicon_path"
+        )
+        if not lexicon_path or not os.path.isfile(lexicon_path):
+            raise FileNotFoundError(
+                "Runtime lexicon not found: {}. Run `python "
+                "tools/build_runtime_lexicon.py` after downloading the MFA "
+                "Bulgarian dictionary.".format(lexicon_path)
+            )
+        word_prons = _load_runtime_lexicon(lexicon_path)
+
+        cache_path = Path(preprocess_config["path"]["preprocessed_path"]) / "g2p_cache.json"
+        cache = _load_g2p_cache(cache_path)
+        missing = sorted(set(all_words) - set(word_prons) - set(cache))
+        if missing:
+            generated = _mfa_g2p_word_prons(
+                missing,
+                g2p_model=g2p_model,
+                mfa_cmd=mfa_cmd,
+            )
+            cache.update(generated)
+            _save_g2p_cache(cache_path, cache)
+        word_prons.update(cache)
+
+        phone_list = []
+        for segment_words, pause_after in segments:
+            for word in segment_words.split():
+                phone_list.extend(word_prons[word])
+            if pause_after and phone_list[-1] != "sp":
+                phone_list.append("sp")
+
+        phones = "{" + " ".join(phone_list) + "}"
+
+    print("Raw Text Sequence: {}".format(normalized_text))
     print("Phoneme Sequence: {}".format(phones))
+
     sequence = np.array(
         text_to_sequence(
-            phones, preprocess_config["preprocessing"]["text"]["text_cleaners"]
+            phones,
+            preprocess_config["preprocessing"]["text"]["text_cleaners"],
         )
     )
 
-    return np.array(sequence)
+    # Guard against silent unknown-phone dropping in text_to_sequence.
+    expected_len = len(phones[1:-1].split()) if phones.startswith("{") else len(sequence)
+    if len(sequence) != expected_len:
+        raise RuntimeError(
+            f"text_to_sequence length mismatch: got {len(sequence)}, "
+            f"expected {expected_len}. This usually means some MFA phones "
+            f"are missing from text/symbols.py."
+        )
+
+    return np.asarray(sequence, dtype=np.int64)
 
 
 def synthesize(model, step, configs, vocoder, batchs, control_values):
@@ -121,6 +297,26 @@ if __name__ == "__main__":
         default=1.0,
         help="control the speed of the whole utterance, larger value for slower speaking rate",
     )
+    parser.add_argument(
+        "--g2p_model",
+        type=str,
+        default="bulgarian_mfa",
+        help="MFA G2P model for Bulgarian raw-text synthesis",
+    )
+
+    parser.add_argument(
+        "--mfa_cmd",
+        type=str,
+        default="mfa",
+        help="MFA command name/path",
+    )
+    parser.add_argument(
+        "--runtime_lexicon",
+        type=str,
+        default=None,
+        help="plain word-to-phone lexicon; defaults to preprocess config",
+    )
+
     args = parser.parse_args()
 
     # Check source texts
@@ -156,7 +352,15 @@ if __name__ == "__main__":
         ids = raw_texts = [args.text[:100]]
         speakers = np.array([args.speaker_id])
         if preprocess_config["preprocessing"]["text"]["language"] == "bg":
-            texts = np.array([preprocess_bulgarian(args.text, preprocess_config)])
+            texts = np.array([
+                preprocess_bulgarian(
+                    args.text,
+                    preprocess_config,
+                    g2p_model=args.g2p_model,
+                    mfa_cmd=args.mfa_cmd,
+                    runtime_lexicon=args.runtime_lexicon,
+                )
+            ])
         else:
             raise ValueError(
                 "Unsupported language '{}'; only 'bg' is configured.".format(

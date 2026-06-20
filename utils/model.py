@@ -6,6 +6,7 @@ import numpy as np
 
 import hifigan
 from model import FastSpeech2, ScheduledOptim
+from utils.pipeline import validate_checkpoint_metadata
 
 
 def get_model(args, configs, device, train=False):
@@ -18,6 +19,9 @@ def get_model(args, configs, device, train=False):
             "{}.pth.tar".format(args.restore_step),
         )
         ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
+        validate_checkpoint_metadata(
+            ckpt.get("pipeline"), preprocess_config, model_config
+        )
         model.load_state_dict(ckpt["model"])
 
     if train:

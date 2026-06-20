@@ -132,3 +132,11 @@ mfa_chunk
 mfa_chunk_out
 mfa_local_out
 filelists
+
+# Phoneme MFA workflow: large/local/generated artifacts
+/bg_realdata/
+/mfa_work/
+/mfa_phone_work/
+/mfa_phone_export/
+/mfa_corpus/
+/lexicon/bulgarian_mfa_runtime.dict

@@ -2,35 +2,36 @@
 
 A trimmed fork of [ming024's FastSpeech 2](https://github.com/ming024/FastSpeech2)
 ([paper](https://arxiv.org/abs/2006.04558)) set up to train a **single-speaker
-Bulgarian** voice from the *Euthymius* LibriVox corpus.
+Bulgarian phoneme model** from a multi-audiobook corpus.
 
-Bulgarian orthography is highly phonemic, so instead of a phoneme dictionary this
-fork uses a **grapheme** approach: each Cyrillic letter is one token. Montreal
-Forced Aligner (MFA) is still used for per-token durations, but its acoustic
-model is **trained from scratch** on these graphemes (the pretrained IPA model is
-not compatible).
+Text is normalized to Bulgarian words and converted to the frozen 46-phone MFA
+inventory. Alignment uses the official Bulgarian MFA dictionary and pretrained
+acoustic model, with the Bulgarian G2P model as an OOV fallback. FastSpeech2's
+phone embeddings themselves are trained from scratch.
 
 ## Pipeline
 
-The whole flow runs in Google Colab — see
-[`colab/Bulgarian_FastSpeech2_Colab.ipynb`](colab/Bulgarian_FastSpeech2_Colab.ipynb)
-(setup → MFA → preprocess → train → synthesize).
+Run MFA locally, validate/package its output, then use
+[`colab/Bulgarian_Phoneme_A100_Colab.ipynb`](colab/Bulgarian_Phoneme_A100_Colab.ipynb)
+for feature extraction and A100 training. Full commands and recovery instructions
+are in [`docs/PHONEME_PIPELINE.md`](docs/PHONEME_PIPELINE.md).
 
 | Step | Command / file |
 |------|----------------|
-| 1. Clean + merge the corpus | `python clean_dataset.py` → `filelists/euthymius_clean.csv` |
-| 2. Build the grapheme dictionary | `python generate_bg_dict.py` → `lexicon/bulgarian-grapheme.txt` |
-| 3. Resample + write `.wav`/`.lab` | `python prepare_align.py config/Bulgarian/preprocess.yaml` |
-| 4. Align (train MFA from scratch) | `mfa train raw_data/Bulgarian lexicon/bulgarian-grapheme.txt bg_acoustic_model.zip --output_directory preprocessed_data/Bulgarian/TextGrid` |
-| 5. Extract features | `python preprocess.py config/Bulgarian/preprocess.yaml` |
-| 6. Train | `python train.py -p config/Bulgarian/preprocess.yaml -m config/Bulgarian/model.yaml -t config/Bulgarian/train.yaml` |
+| 1. Prepare wav/lab | `python prepare_align.py config/Bulgarian/preprocess.yaml` |
+| 2. Build pseudo-speakers | `python tools/build_mfa_corpus.py --reset` |
+| 3. Align with dictionary + G2P | `python tools/run_mfa_alignment.py --reset-output` |
+| 4. Validate | `python tools/validate_mfa_pipeline.py --stage alignment` |
+| 5. Package | `python tools/package_for_colab.py` |
+| 6. Preprocess and train | `colab/Bulgarian_Phoneme_A100_Colab.ipynb` |
 | 7. Synthesize | `python synthesize.py --text "Здравей" --restore_step N --mode single -p config/Bulgarian/preprocess.yaml -m config/Bulgarian/model.yaml -t config/Bulgarian/train.yaml` |
 
 ## Bulgarian-specific code
 
-- `text/bulgarian.py` — grapheme G2P + text normalisation (single source of truth).
+- `bulgarian_normalization.py` — dependency-free canonical normalization.
+- `text/bulgarian_mfa_phones.py` — frozen ordered phone inventory.
+- `tools/run_mfa_alignment.py` — safe resumable G2P-backed alignment.
 - `num2wordBg.py` — Bulgarian number-to-words expansion.
-- `clean_dataset.py` / `generate_bg_dict.py` — dataset cleaning and dictionary build.
 - `preprocessor/bulgarian.py`, `config/Bulgarian/` — preprocessing + configs.
 
 The vocoder is the bundled HiFi-GAN **universal** model

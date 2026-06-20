@@ -1,29 +1,22 @@
-""" adapted from https://github.com/keithito/tacotron """
+"""Stable symbol ABI for Bulgarian phoneme FastSpeech2 checkpoints."""
 
-"""
-Defines the set of symbols used in text input to the model.
+import hashlib
+import json
 
-For Bulgarian we use grapheme tokens: one token per Cyrillic letter, prefixed
-with "@" to match the curly-brace path in text/__init__.py. See text/bulgarian.py.
-"""
+from text.bulgarian_mfa_phones import INVENTORY_VERSION, PHONES
 
-from text import bulgarian
 
 _pad = "_"
-_punctuation = "!'(),.:;? "
-_special = "-"
-_letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
-_silences = ["@sp", "@spn", "@sil"]
 
-# Bulgarian graphemes (each Cyrillic letter is a token); see text/bulgarian.py.
-_bulgarian = ["@" + s for s in bulgarian.BG_ALPHABET]
+# The order is checkpoint ABI.  Do not sort dynamically or derive it from one
+# particular alignment subset.
+symbols = [_pad] + ["@" + phone for phone in PHONES]
 
-# Export all symbols:
-symbols = (
-    [_pad]
-    + list(_special)
-    + list(_punctuation)
-    + list(_letters)
-    + _bulgarian
-    + _silences
-)
+
+def symbols_sha256():
+    payload = json.dumps(
+        {"inventory_version": INVENTORY_VERSION, "symbols": symbols},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()

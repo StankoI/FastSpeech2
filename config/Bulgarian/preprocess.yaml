@@ -1,14 +1,27 @@
 dataset: "Bulgarian"
 
+mfa:
+  base_dictionary_model: "bulgarian_mfa"
+  alignment_dictionary: "lexicon/bulgarian_mfa_runtime.dict"
+  acoustic_model: "bulgarian_mfa"
+  g2p_model: "bulgarian_mfa"
+  max_failed_ratio: 0.01
+
 path:
-  corpus_path: "."                                   # base for relative wav paths in the manifest
-  manifest_path: "./filelists/euthymius_clean.csv"   # produced by clean_dataset.py
-  lexicon_path: "lexicon/bulgarian-grapheme.txt"     # produced by generate_bg_dict.py
+  corpus_path: "bg_realdata"
+  manifest_path: "bg_realdata/manifest.csv"
+  runtime_lexicon_path: "lexicon/bulgarian_mfa_runtime.dict"
+
   raw_path: "./raw_data/Bulgarian"
   preprocessed_path: "./preprocessed_data/Bulgarian"
 
 preprocessing:
   val_size: 500
+  split_seed: 42
+  clean_output: True
+  prune_raw_output: True
+  max_rejected_ratio: 0.01
+  max_feature_rejected_ratio: 0.01
   text:
     text_cleaners: ["bulgarian_cleaners"]
     language: "bg"

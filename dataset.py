@@ -60,6 +60,21 @@ class Dataset(Dataset):
         )
         duration = np.load(duration_path)
 
+        lengths = {
+            "phone": len(phone),
+            "duration": len(duration),
+            "pitch": len(pitch),
+            "energy": len(energy),
+        }
+        if len(set(lengths.values())) != 1:
+            raise ValueError("{} feature length mismatch: {}".format(basename, lengths))
+        if int(np.sum(duration)) != int(mel.shape[0]):
+            raise ValueError(
+                "{} duration sum {} != mel frames {}".format(
+                    basename, int(np.sum(duration)), mel.shape[0]
+                )
+            )
+
         sample = {
             "id": basename,
             "speaker": speaker_id,
@@ -82,7 +97,7 @@ class Dataset(Dataset):
             text = []
             raw_text = []
             for line in f.readlines():
-                n, s, t, r = line.strip("\n").split("|")
+                n, s, t, r = line.strip("\n").split("|", 3)
                 name.append(n)
                 speaker.append(s)
                 text.append(t)
@@ -179,7 +194,7 @@ class TextDataset(Dataset):
             text = []
             raw_text = []
             for line in f.readlines():
-                n, s, t, r = line.strip("\n").split("|")
+                n, s, t, r = line.strip("\n").split("|", 3)
                 name.append(n)
                 speaker.append(s)
                 text.append(t)
