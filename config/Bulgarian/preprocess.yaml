@@ -7,9 +7,15 @@ mfa:
   g2p_model: "bulgarian_mfa"
   max_failed_ratio: 0.01
 
+prosody:
+  # Refuse to train a "punctuation model" on accidentally stripped text.
+  min_punctuated_utterance_ratio: 0.05
+  required_tokens: ["p_comma", "p_period", "p_question", "p_exclamation"]
+
 path:
   corpus_path: "bg_realdata"
-  manifest_path: "bg_realdata/manifest.csv"
+  manifest_path: "bg_realdata/manifest_punctuated.csv"
+  prosody_manifest_path: "./raw_data/Bulgarian/prosody_manifest.json"
   runtime_lexicon_path: "lexicon/bulgarian_mfa_runtime.dict"
 
   raw_path: "./raw_data/Bulgarian"

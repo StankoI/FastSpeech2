@@ -17,7 +17,7 @@ import shutil
 import subprocess
 import tempfile
 
-from bulgarian_normalization import synthesis_segments
+from bulgarian_normalization import prosody_words
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -152,11 +152,11 @@ def preprocess_bulgarian(
         phones = text
         normalized_text = text
     else:
-        segments = synthesis_segments(text)
-        if not segments:
+        word_prosody = prosody_words(text)
+        if not word_prosody:
             raise ValueError("Input is empty after Bulgarian normalization")
-        normalized_text = " ".join(words for words, _ in segments)
-        all_words = [word for words, _ in segments for word in words.split()]
+        normalized_text = " ".join(word for word, _ in word_prosody)
+        all_words = [word for word, _ in word_prosody]
 
         lexicon_path = runtime_lexicon or preprocess_config["path"].get(
             "runtime_lexicon_path"
@@ -183,11 +183,12 @@ def preprocess_bulgarian(
         word_prons.update(cache)
 
         phone_list = []
-        for segment_words, pause_after in segments:
-            for word in segment_words.split():
-                phone_list.extend(word_prons[word])
-            if pause_after and phone_list[-1] != "sp":
-                phone_list.append("sp")
+        for index, (word, punctuation) in enumerate(word_prosody):
+            phone_list.extend(word_prons[word])
+            if punctuation:
+                phone_list.append(punctuation)
+            elif index < len(word_prosody) - 1:
+                phone_list.append("wb")
 
         phones = "{" + " ".join(phone_list) + "}"
 

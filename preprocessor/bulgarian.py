@@ -7,7 +7,12 @@ import numpy as np
 from scipy.io import wavfile
 from tqdm import tqdm
 
-from bulgarian_normalization import normalize_for_mfa
+from bulgarian_normalization import (
+    NORMALIZER_VERSION,
+    normalize_for_mfa,
+    normalize_with_punctuation,
+    prosody_words,
+)
 
 
 def _read_manifest(path):
@@ -58,6 +63,31 @@ def prepare_align(config):
     max_wav_value = config["preprocessing"]["audio"]["max_wav_value"]
 
     rows = list(_read_manifest(manifest))
+    punctuation_counts = {}
+    punctuated_rows = 0
+    for _, _, source_text in rows:
+        tokens = [token for _, token in prosody_words(source_text) if token]
+        punctuated_rows += int(bool(tokens))
+        for token in tokens:
+            punctuation_counts[token] = punctuation_counts.get(token, 0) + 1
+    prosody_config = config.get("prosody", {})
+    punctuated_ratio = punctuated_rows / len(rows) if rows else 0
+    minimum_punctuated = float(
+        prosody_config.get("min_punctuated_utterance_ratio", 0)
+    )
+    missing_punctuation = [
+        token
+        for token in prosody_config.get("required_tokens", [])
+        if punctuation_counts.get(token, 0) == 0
+    ]
+    if punctuated_ratio < minimum_punctuated or missing_punctuation:
+        raise RuntimeError(
+            "Source manifest cannot train punctuation: punctuated_ratio={:.2%} "
+            "minimum={:.2%}, missing_required={}. Supply a punctuated manifest; "
+            "MFA TextGrids remain reusable when normalized words are unchanged.".format(
+                punctuated_ratio, minimum_punctuated, missing_punctuation
+            )
+        )
     resolved_rows = [
         (
             basename,
@@ -89,6 +119,7 @@ def prepare_align(config):
         )
 
     accepted = []
+    prosody_entries = {}
     rejected = []
     for basename, wav_path, raw_text in tqdm(resolved_rows):
 
@@ -117,6 +148,12 @@ def prepare_align(config):
             lab.write(text)
 
         accepted.append(basename)
+        punctuated = normalize_with_punctuation(raw_text)
+        prosody_entries[basename] = {
+            "text": punctuated,
+            "mfa_text": text,
+            "has_punctuation": any(token for _, token in prosody_words(raw_text)),
+        }
 
     report = {
         "manifest": str(manifest),
@@ -130,6 +167,24 @@ def prepare_align(config):
     report_path = out_dir / "prepare_align_report.json"
     with open(report_path, "w", encoding="utf-8") as report_file:
         json.dump(report, report_file, ensure_ascii=False, indent=2)
+
+    prosody_path = Path(
+        config["path"].get("prosody_manifest_path", out_dir / "prosody_manifest.json")
+    )
+    prosody_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(prosody_path, "w", encoding="utf-8") as prosody_file:
+        json.dump(
+            {
+                "format_version": 1,
+                "normalizer_version": NORMALIZER_VERSION,
+                "source_manifest": str(manifest),
+                "entries": prosody_entries,
+            },
+            prosody_file,
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        )
 
     rejected_ratio = len(rejected) / len(rows) if rows else 1.0
     if not accepted or rejected_ratio > maximum_ratio:
@@ -154,3 +209,4 @@ def prepare_align(config):
     print("[prepare_align] accepted:", len(accepted))
     print("[prepare_align] rejected:", len(rejected))
     print("[prepare_align] report:", report_path)
+    print("[prepare_align] prosody:", prosody_path)

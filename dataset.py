@@ -1,12 +1,50 @@
 import json
 import math
 import os
+import hashlib
 
 import numpy as np
 from torch.utils.data import Dataset
 
 from text import text_to_sequence
 from utils.tools import pad_1D, pad_2D
+from bulgarian_normalization import NORMALIZER_VERSION
+from text.bulgarian_mfa_phones import INVENTORY_VERSION
+
+
+def _validate_linguistic_abi(preprocess_config):
+    root = preprocess_config["path"]["preprocessed_path"]
+    path = os.path.join(root, "linguistic_abi.json")
+    if not os.path.isfile(path):
+        raise RuntimeError(
+            "Missing {}. These are old preprocessed features; rebuild them for "
+            "the punctuation-aware ABI.".format(path)
+        )
+    with open(path, encoding="utf-8") as handle:
+        abi = json.load(handle)
+    expected = {
+        "inventory_version": INVENTORY_VERSION,
+        "normalizer_version": NORMALIZER_VERSION,
+    }
+    mismatches = {
+        key: {"features": abi.get(key), "code": value}
+        for key, value in expected.items()
+        if abi.get(key) != value
+    }
+    prosody_path = preprocess_config["path"].get("prosody_manifest_path")
+    if not prosody_path or not os.path.isfile(prosody_path):
+        mismatches["prosody_manifest"] = "missing"
+    else:
+        with open(prosody_path, "rb") as handle:
+            actual_sha = hashlib.sha256(handle.read()).hexdigest()
+        if abi.get("prosody_manifest_sha256") != actual_sha:
+            mismatches["prosody_manifest_sha256"] = {
+                "features": abi.get("prosody_manifest_sha256"),
+                "actual": actual_sha,
+            }
+    if mismatches:
+        raise RuntimeError("Preprocessed linguistic ABI mismatch: {}".format(mismatches))
+    return abi
 
 
 class Dataset(Dataset):
@@ -17,6 +55,7 @@ class Dataset(Dataset):
         self.preprocessed_path = preprocess_config["path"]["preprocessed_path"]
         self.cleaners = preprocess_config["preprocessing"]["text"]["text_cleaners"]
         self.batch_size = train_config["optimizer"]["batch_size"]
+        _validate_linguistic_abi(preprocess_config)
 
         self.basename, self.speaker, self.text, self.raw_text = self.process_meta(
             filename
@@ -163,6 +202,7 @@ class Dataset(Dataset):
 
 class TextDataset(Dataset):
     def __init__(self, filepath, preprocess_config):
+        _validate_linguistic_abi(preprocess_config)
         self.cleaners = preprocess_config["preprocessing"]["text"]["text_cleaners"]
 
         self.basename, self.speaker, self.text, self.raw_text = self.process_meta(

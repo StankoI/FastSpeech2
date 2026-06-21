@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""
+r"""
 split_by_sentences.py
 =====================
 
@@ -8,13 +8,12 @@ into one WAV clip per sentence, producing a ``text,audioFile`` CSV manifest.
 
 Pipeline
 --------
-1. **Normalise** ``testText1.txt``:
-     * expand every number to Bulgarian words (``num2wordBg.text_numbers_to_words``),
-     * split into sentences (one sentence per line),
-     * strip ``-`` and every other non-letter symbol, lowercase
-       (``text/bulgarian.py:normalize_text``).
-   The result is written to ``testText1.normalized.txt`` -- one sentence per line,
-   which is exactly the plain-text format aeneas expects.
+1. **Normalise** ``testText1.txt`` into synchronized representations:
+     * word-only text for aeneas alignment;
+     * punctuation-preserving text for training metadata.
+   The word-only result is written to ``testText1.normalized.txt`` because that
+   is the plain-text format aeneas expects. Punctuation is never discarded from
+   the CSV training transcript.
 2. **Align** the sentence list to ``01_Pista01.mp3`` with **aeneas** (forced
    alignment) -> begin/end timestamp for every sentence.  Saved as ``syncmap.json``.
    (Use ``--reuse-syncmap`` to skip this slow step and re-cut from a saved map.)
@@ -97,8 +96,7 @@ REPO_ROOT = SCRIPT_DIR.parent
 
 
 # ---------------------------------------------------------------------------
-# Reuse the project's normalisation primitives without importing the whole
-# ``text`` package (we load the two source files directly; both only need ``re``).
+# Reuse the same dependency-free dual normalizer as MFA and synthesis.
 # ---------------------------------------------------------------------------
 def _load_module(name: str, path: Path):
     spec = importlib.util.spec_from_file_location(name, path)
@@ -107,10 +105,13 @@ def _load_module(name: str, path: Path):
     return module
 
 
-_num2word = _load_module("num2wordBg", REPO_ROOT / "num2wordBg.py")
-_bg = _load_module("bg_normalize", REPO_ROOT / "text" / "bulgarian.py")
-text_numbers_to_words = _num2word.text_numbers_to_words
-normalize_text = _bg.normalize_text
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+_bg = _load_module(
+    "bulgarian_dual_normalization", REPO_ROOT / "bulgarian_normalization.py"
+)
+normalize_for_mfa = _bg.normalize_for_mfa
+normalize_with_punctuation = _bg.normalize_with_punctuation
 
 
 # ---------------------------------------------------------------------------
@@ -123,25 +124,26 @@ normalize_text = _bg.normalize_text
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?…])\s+")
 
 
-def normalise_to_sentences(raw_text: str) -> list[str]:
-    """Turn raw book text into a list of cleaned, one-line-per-sentence strings.
-
-    Numbers are expanded to Bulgarian words first (while the digits are intact),
-    then each line is split into sentences and each sentence is reduced to
-    lowercase Bulgarian letters and single spaces (drops ``-`` and every other
-    symbol). Sentences that normalise to nothing are skipped.
-    """
-    sentences: list[str] = []
+def normalise_to_sentence_pairs(raw_text: str) -> list[tuple[str, str]]:
+    """Return ``(word_only_alignment_text, punctuated_training_text)`` pairs."""
+    sentences: list[tuple[str, str]] = []
     for line in raw_text.splitlines():
         line = line.strip()
         if not line:
             continue
-        line = text_numbers_to_words(line)
         for chunk in _SENTENCE_SPLIT_RE.split(line):
-            cleaned = normalize_text(chunk)
-            if cleaned:
-                sentences.append(cleaned)
+            word_only = normalize_for_mfa(chunk)
+            punctuated = normalize_with_punctuation(chunk)
+            if word_only:
+                if normalize_for_mfa(punctuated) != word_only:
+                    raise RuntimeError("Dual normalization produced different words")
+                sentences.append((word_only, punctuated))
     return sentences
+
+
+def normalise_to_sentences(raw_text: str) -> list[str]:
+    """Backward-compatible word-only view used by older callers/tests."""
+    return [word_only for word_only, _ in normalise_to_sentence_pairs(raw_text)]
 
 
 # ---------------------------------------------------------------------------
@@ -446,9 +448,11 @@ def main() -> None:
 
     # --- Step 1: normalise -------------------------------------------------
     raw = args.text.read_text(encoding="utf-8")
-    sentences = normalise_to_sentences(raw)
-    if not sentences:
+    sentence_pairs = normalise_to_sentence_pairs(raw)
+    if not sentence_pairs:
         sys.exit("No sentences produced from the transcript.")
+    sentences = [word_only for word_only, _ in sentence_pairs]
+    punctuated_sentences = [punctuated for _, punctuated in sentence_pairs]
     normalized_path.write_text("\n".join(sentences) + "\n", encoding="utf-8")
     print(f"[1/3] Normalised {len(sentences)} sentences -> {normalized_path.name}")
 
@@ -467,7 +471,9 @@ def main() -> None:
               f"sentences; pairing the first {min(len(spans), len(sentences))}.",
               file=sys.stderr)
     n = min(len(spans), len(sentences))
-    spans, sentences = spans[:n], sentences[:n]
+    spans = spans[:n]
+    sentences = sentences[:n]
+    punctuated_sentences = punctuated_sentences[:n]
 
     # --- Step 3: decode, detect silence, drop orphans, snap, cut ----------
     print("[3/3] Cutting audio into clips ...")
@@ -487,7 +493,7 @@ def main() -> None:
 
     # Drop fragments aeneas could not place in real audio (zero-duration tail,
     # or starting past the last speech): these have no corresponding audio.
-    kept = [(s, sp) for s, sp in zip(sentences, spans)
+    kept = [(s, sp) for s, sp in zip(punctuated_sentences, spans)
             if (sp[1] - sp[0]) >= args.min_duration and sp[0] < last_speech - 0.2]
     dropped = len(sentences) - len(kept)
     if not kept:

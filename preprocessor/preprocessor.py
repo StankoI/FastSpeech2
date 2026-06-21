@@ -2,9 +2,8 @@ import os
 import random
 import json
 import shutil
-import unicodedata
+import hashlib
 
-import tgt
 import librosa
 import numpy as np
 import pyworld as pw
@@ -13,6 +12,14 @@ from sklearn.preprocessing import StandardScaler
 from tqdm import tqdm
 
 import audio as Audio
+from bulgarian_normalization import NORMALIZER_VERSION, prosody_words
+from prosody_alignment import align_with_prosody
+from text.bulgarian_mfa_phones import (
+    CONTROL_TOKENS,
+    INVENTORY_VERSION,
+    PUNCTUATION_TOKENS,
+)
+from textgrid_utils import read_textgrid
 
 
 class Preprocessor:
@@ -23,6 +30,7 @@ class Preprocessor:
         self.val_size = config["preprocessing"]["val_size"]
         self.sampling_rate = config["preprocessing"]["audio"]["sampling_rate"]
         self.hop_length = config["preprocessing"]["stft"]["hop_length"]
+        self.prosody_entries = self._load_prosody_manifest()
 
         assert config["preprocessing"]["pitch"]["feature"] in [
             "phoneme_level",
@@ -52,11 +60,75 @@ class Preprocessor:
             config["preprocessing"]["mel"]["mel_fmax"],
         )
 
+    def _load_prosody_manifest(self):
+        path = self.config["path"].get("prosody_manifest_path")
+        if not path or not os.path.isfile(path):
+            raise FileNotFoundError(
+                "Missing prosody manifest: {}. Run `python "
+                "tools/build_prosody_manifest.py` before preprocessing.".format(path)
+            )
+        with open(path, encoding="utf-8") as handle:
+            payload = json.load(handle)
+        if payload.get("format_version") != 1:
+            raise RuntimeError("Unsupported prosody manifest format: {}".format(path))
+        if payload.get("normalizer_version") != NORMALIZER_VERSION:
+            raise RuntimeError(
+                "Prosody normalizer version mismatch: manifest={} code={}. "
+                "Rebuild the prosody manifest.".format(
+                    payload.get("normalizer_version"), NORMALIZER_VERSION
+                )
+            )
+        entries = payload.get("entries")
+        if not isinstance(entries, dict) or not entries:
+            raise RuntimeError("Prosody manifest has no entries: {}".format(path))
+        counts = {token: 0 for token in PUNCTUATION_TOKENS}
+        punctuated_entries = 0
+        for entry in entries.values():
+            tokens = [
+                token
+                for _, token in prosody_words(
+                    entry.get("text", ""), expand_numbers=False
+                )
+                if token
+            ]
+            punctuated_entries += int(bool(tokens))
+            for token in tokens:
+                counts[token] += 1
+        prosody_config = self.config.get("prosody", {})
+        ratio = punctuated_entries / len(entries)
+        minimum = float(prosody_config.get("min_punctuated_utterance_ratio", 0))
+        missing_required = [
+            token
+            for token in prosody_config.get("required_tokens", [])
+            if counts.get(token, 0) == 0
+        ]
+        if ratio < minimum or missing_required:
+            raise RuntimeError(
+                "Prosody coverage is insufficient: punctuated_ratio={:.2%} "
+                "minimum={:.2%}, missing_required={}. The source manifest has "
+                "already lost punctuation; provide punctuated transcripts and "
+                "rerun tools/build_prosody_manifest.py.".format(
+                    ratio, minimum, missing_required
+                )
+            )
+        return entries
+
     def build_from_path(self):
         feature_dirs = ["mel", "pitch", "energy", "duration"]
         if self.config["preprocessing"].get("clean_output", True):
             for name in feature_dirs:
                 shutil.rmtree(os.path.join(self.out_dir, name), ignore_errors=True)
+            for name in (
+                "train.txt",
+                "val.txt",
+                "stats.json",
+                "speakers.json",
+                "linguistic_abi.json",
+                "feature_extraction_report.json",
+            ):
+                path = os.path.join(self.out_dir, name)
+                if os.path.isfile(path):
+                    os.unlink(path)
         for name in feature_dirs:
             os.makedirs(os.path.join(self.out_dir, name), exist_ok=True)
 
@@ -192,6 +264,32 @@ class Preprocessor:
             }
             f.write(json.dumps(stats))
 
+        token_counts = {}
+        for row in out:
+            token_text = row.split("|", 3)[2]
+            for token in token_text[1:-1].split():
+                if token in CONTROL_TOKENS:
+                    token_counts[token] = token_counts.get(token, 0) + 1
+        with open(
+            os.path.join(self.out_dir, "linguistic_abi.json"), "w", encoding="utf-8"
+        ) as f:
+            prosody_path = self.config["path"]["prosody_manifest_path"]
+            with open(prosody_path, "rb") as prosody_file:
+                prosody_sha256 = hashlib.sha256(prosody_file.read()).hexdigest()
+            json.dump(
+                {
+                    "inventory_version": INVENTORY_VERSION,
+                    "normalizer_version": NORMALIZER_VERSION,
+                    "prosody_manifest_sha256": prosody_sha256,
+                    "utterance_count": len(out),
+                    "control_counts": token_counts,
+                },
+                f,
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            )
+
         print(
             "Total time: {} hours".format(
                 n_frames * self.hop_length / self.sampling_rate / 3600
@@ -251,14 +349,18 @@ class Preprocessor:
         missing_grids = sorted(raw - grids)
         extra_grids = sorted(grids - raw)
         missing_grid_ids = {basename for _, basename in missing_grids}
+        raw_ids = {basename for _, basename in raw}
+        prosody_ids = set(self.prosody_entries)
         if (
             missing_labs
             or extra_grids
             or missing_grid_ids != self.excluded_alignment_ids
+            or raw_ids != prosody_ids
         ):
             raise RuntimeError(
                 "Alignment coverage mismatch: wavs={}, labs={}, TextGrids={}, "
-                "missing_labs={} missing_TextGrids={} extra_TextGrids={}. "
+                "missing_labs={} missing_TextGrids={} extra_TextGrids={} "
+                "missing_prosody={} extra_prosody={}. "
                 "Run tools/validate_mfa_pipeline.py --stage alignment first."
                 .format(
                     len(raw),
@@ -267,6 +369,8 @@ class Preprocessor:
                     missing_labs[:10],
                     missing_grids[:10],
                     extra_grids[:10],
+                    sorted(raw_ids - prosody_ids)[:10],
+                    sorted(prosody_ids - raw_ids)[:10],
                 )
             )
 
@@ -278,10 +382,28 @@ class Preprocessor:
             self.out_dir, "TextGrid", speaker, "{}.TextGrid".format(basename)
         )
 
-        # Get alignments
-        textgrid = tgt.io.read_textgrid(tg_path)
+        with open(text_path, "r", encoding="utf-8") as f:
+            mfa_text = f.readline().strip()
+        prosody = self.prosody_entries.get(basename)
+        if prosody is None:
+            raise RuntimeError("Missing prosody entry for {}".format(basename))
+        if prosody.get("mfa_text") != mfa_text:
+            raise RuntimeError(
+                "Prosody/MFA transcript mismatch for {}: {!r} != {!r}".format(
+                    basename, prosody.get("mfa_text"), mfa_text
+                )
+            )
+        word_prosody = prosody_words(
+            prosody.get("text", ""), expand_numbers=False
+        )
+
+        # Get alignments and inject word/punctuation controls from the source
+        # transcript. MFA itself still sees only the word-only .lab text.
+        textgrid = read_textgrid(tg_path)
         phone, duration, start, end = self.get_alignment(
-            textgrid.get_tier_by_name("phones")
+            textgrid["phones"],
+            textgrid["words"],
+            word_prosody,
         )
         text = "{" + " ".join(phone) + "}"
         if start >= end:
@@ -294,9 +416,8 @@ class Preprocessor:
             int(self.sampling_rate * start) : int(self.sampling_rate * end)
         ].astype(np.float32)
 
-        # Read raw text
-        with open(text_path, "r", encoding="utf-8") as f:
-            raw_text = f.readline().strip("\n")
+        # Keep the punctuation-preserving canonical transcript in metadata.
+        raw_text = prosody["text"]
 
         # Compute fundamental frequency
         pitch, t = pw.dio(
@@ -337,6 +458,12 @@ class Preprocessor:
                 pos += d
             pitch = pitch[: len(duration)]
 
+            # Silence/punctuation has no meaningful F0. Word boundaries have
+            # zero duration and are excluded from variance losses downstream.
+            for i, token in enumerate(phone):
+                if token in {"sp", "sil"} or token in PUNCTUATION_TOKENS:
+                    pitch[i] = 0
+
         if self.energy_phoneme_averaging:
             # Phoneme-level average
             pos = 0
@@ -347,6 +474,13 @@ class Preprocessor:
                     energy[i] = 0
                 pos += d
             energy = energy[: len(duration)]
+
+        for i, d in enumerate(duration):
+            if d == 0:
+                if self.pitch_phoneme_averaging:
+                    pitch[i] = 0
+                if self.energy_phoneme_averaging:
+                    energy[i] = 0
 
         # Save files
         dur_filename = "{}-duration-{}.npy".format(speaker, basename)
@@ -364,62 +498,38 @@ class Preprocessor:
             mel_spectrogram.T,
         )
 
+        lexical_mask = np.asarray(
+            [
+                d > 0 and token not in CONTROL_TOKENS and token not in {"sp", "sil"}
+                for token, d in zip(phone, duration)
+            ]
+        )
+
         return (
             "|".join([basename, speaker, text, raw_text]),
-            self.remove_outlier(pitch),
-            self.remove_outlier(energy),
+            self.remove_outlier(pitch[lexical_mask])
+            if self.pitch_phoneme_averaging
+            else self.remove_outlier(pitch),
+            self.remove_outlier(energy[lexical_mask])
+            if self.energy_phoneme_averaging
+            else self.remove_outlier(energy),
             mel_spectrogram.shape[1],
         )
 
-    def get_alignment(self, tier):
-        phones = []
-        durations = []
-        start_time = None
-        end_time = None
-        end_idx = 0
-
-        for interval in tier._objects:
-            start, end = interval.start_time, interval.end_time
-            phone = unicodedata.normalize("NFC", interval.text.strip())
-
-            # MFA 3 exports silence as an empty phone label.  Canonicalize both
-            # empty and explicit silence to the single internal pause token.
-            if phone in {"", "sil"}:
-                phone = "sp"
-
-            duration = int(
-                np.round(end * self.sampling_rate / self.hop_length)
-                - np.round(start * self.sampling_rate / self.hop_length)
-            )
-
-            # Trim leading silence.  ``spn`` is deliberately not silence: after
-            # G2P-backed alignment it represents real unknown/noise and must stay
-            # visible to validation and training.
-            if not phones and phone == "sp":
-                continue
-            if start_time is None:
-                start_time = start
-
-            if phone == "sp" and phones and phones[-1] == "sp":
-                durations[-1] += duration
-            else:
-                phones.append(phone)
-                durations.append(duration)
-
-            if phone != "sp":
-                end_time = end
-                end_idx = len(phones)
-
-        phones = phones[:end_idx]
-        durations = durations[:end_idx]
-        if not phones or start_time is None or end_time is None:
-            return [], [], 0, 0
-        if len(phones) != len(durations) or any(not phone for phone in phones):
-            raise RuntimeError("Invalid phone/duration alignment")
-        return phones, durations, start_time, end_time
+    def get_alignment(self, tier, word_tier, expected_word_prosody):
+        """Return MFA phones augmented with deterministic linguistic controls."""
+        return align_with_prosody(
+            tier,
+            word_tier,
+            expected_word_prosody,
+            self.sampling_rate,
+            self.hop_length,
+        )
 
     def remove_outlier(self, values):
         values = np.array(values)
+        if len(values) < 4:
+            return values
         p25 = np.percentile(values, 25)
         p75 = np.percentile(values, 75)
         lower = p25 - 1.5 * (p75 - p25)
@@ -433,7 +543,9 @@ class Preprocessor:
         min_value = np.finfo(np.float64).max
         for filename in os.listdir(in_dir):
             filename = os.path.join(in_dir, filename)
-            values = (np.load(filename) - mean) / std
+            # Scikit-learn statistics are float64 and would otherwise promote
+            # saved targets to Double. Keep the on-disk training ABI float32.
+            values = ((np.load(filename) - mean) / std).astype(np.float32)
             np.save(filename, values)
 
             max_value = max(max_value, max(values))

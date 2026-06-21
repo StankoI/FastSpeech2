@@ -6,7 +6,7 @@ TextGrids, and ``spn`` is reserved for genuine unknown/noise spans.  Never
 reorder this list for an existing checkpoint.
 """
 
-INVENTORY_VERSION = 1
+INVENTORY_VERSION = 2
 
 PHONES = [
     "a",
@@ -58,5 +58,26 @@ PHONES = [
     "sp",
     "sil",
     "spn",
+    # Non-acoustic linguistic controls. ``wb`` always has zero target duration;
+    # punctuation may carry an aligned pause duration or zero frames.
+    "wb",
+    "p_comma",
+    "p_semicolon",
+    "p_colon",
+    "p_period",
+    "p_question",
+    "p_exclamation",
+    "p_dash",
 ]
 
+WORD_BOUNDARY_TOKEN = "wb"
+PUNCTUATION_TOKENS = (
+    "p_comma",
+    "p_semicolon",
+    "p_colon",
+    "p_period",
+    "p_question",
+    "p_exclamation",
+    "p_dash",
+)
+CONTROL_TOKENS = (WORD_BOUNDARY_TOKEN,) + PUNCTUATION_TOKENS

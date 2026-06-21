@@ -37,7 +37,10 @@ def to_device(data, device):
         mels = torch.from_numpy(mels).float().to(device)
         mel_lens = torch.from_numpy(mel_lens).to(device)
         pitches = torch.from_numpy(pitches).float().to(device)
-        energies = torch.from_numpy(energies).to(device)
+        # Feature normalization can promote NumPy energy arrays to float64.
+        # Model predictions and all regression targets must remain float32;
+        # otherwise MSELoss reaches backward with a Double target.
+        energies = torch.from_numpy(energies).float().to(device)
         durations = torch.from_numpy(durations).long().to(device)
 
         return (
@@ -110,8 +113,12 @@ def synth_one_sample(targets, predictions, vocoder, model_config, preprocess_con
     basename = targets[0][0]
     src_len = predictions[8][0].item()
     mel_len = predictions[9][0].item()
-    mel_target = targets[6][0, :mel_len].detach().transpose(0, 1)
-    mel_prediction = predictions[1][0, :mel_len].detach().transpose(0, 1)
+    mel_target = targets[6][0, :mel_len].detach().transpose(0, 1).float()
+    # Training predictions are BF16 under A100 autocast. NumPy plotting and
+    # the FP32 HiFi-GAN vocoder both require an explicit float32 boundary.
+    mel_prediction = (
+        predictions[1][0, :mel_len].detach().transpose(0, 1).float()
+    )
     duration = targets[11][0, :src_len].detach().cpu().numpy()
     if preprocess_config["preprocessing"]["pitch"]["feature"] == "phoneme_level":
         pitch = targets[9][0, :src_len].detach().cpu().numpy()
@@ -167,18 +174,20 @@ def synth_samples(targets, predictions, vocoder, model_config, preprocess_config
         basename = basenames[i]
         src_len = predictions[8][i].item()
         mel_len = predictions[9][i].item()
-        mel_prediction = predictions[1][i, :mel_len].detach().transpose(0, 1)
+        mel_prediction = (
+            predictions[1][i, :mel_len].detach().transpose(0, 1).float()
+        )
         duration = predictions[5][i, :src_len].detach().cpu().numpy()
         if preprocess_config["preprocessing"]["pitch"]["feature"] == "phoneme_level":
-            pitch = predictions[2][i, :src_len].detach().cpu().numpy()
+            pitch = predictions[2][i, :src_len].detach().float().cpu().numpy()
             pitch = expand(pitch, duration)
         else:
-            pitch = predictions[2][i, :mel_len].detach().cpu().numpy()
+            pitch = predictions[2][i, :mel_len].detach().float().cpu().numpy()
         if preprocess_config["preprocessing"]["energy"]["feature"] == "phoneme_level":
-            energy = predictions[3][i, :src_len].detach().cpu().numpy()
+            energy = predictions[3][i, :src_len].detach().float().cpu().numpy()
             energy = expand(energy, duration)
         else:
-            energy = predictions[3][i, :mel_len].detach().cpu().numpy()
+            energy = predictions[3][i, :mel_len].detach().float().cpu().numpy()
 
         with open(
             os.path.join(preprocess_config["path"]["preprocessed_path"], "stats.json")

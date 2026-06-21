@@ -2,9 +2,9 @@
 """Strict validation gates for Bulgarian MFA alignment and FS2 preprocessing."""
 
 import argparse
+import concurrent.futures
 import hashlib
 import json
-import re
 import sys
 import unicodedata
 from collections import Counter
@@ -18,37 +18,21 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from text import text_to_sequence
-from text.bulgarian_mfa_phones import PHONES
-
-
-INTERVAL_RE = re.compile(
-    r"intervals \[\d+\]:\s*"
-    r"xmin = ([\d.eE+-]+)\s*"
-    r"xmax = ([\d.eE+-]+)\s*"
-    r'text = "(.*?)"',
-    re.S,
+from bulgarian_normalization import NORMALIZER_VERSION, prosody_words
+from text.bulgarian_mfa_phones import (
+    CONTROL_TOKENS,
+    INVENTORY_VERSION,
+    PHONES,
+    PUNCTUATION_TOKENS,
+    WORD_BOUNDARY_TOKEN,
 )
-
-
-def parse_tier(textgrid_text, tier_name):
-    match = re.search(
-        r'name = "{}".*?intervals: size = \d+\s*'
-        r"(.*?)(?:\n    item \[|\Z)".format(re.escape(tier_name)),
-        textgrid_text,
-        re.S,
-    )
-    if not match:
-        raise ValueError("TextGrid has no {!r} tier".format(tier_name))
-    return [
-        (float(start), float(end), label)
-        for start, end, label in INTERVAL_RE.findall(match.group(1))
-    ]
+from textgrid_utils import parse_tier
 
 
 def interval_word(words, midpoint):
-    for start, end, label in words:
-        if start <= midpoint <= end:
-            return label.strip().lower()
+    for interval in words._objects:
+        if interval.start_time <= midpoint <= interval.end_time:
+            return interval.text.strip().lower()
     return ""
 
 
@@ -62,6 +46,21 @@ def validate_alignment(config, allow_spn_words):
     with open(run_metadata_path, encoding="utf-8") as handle:
         run_metadata = json.load(handle)
     failed_ids = set(run_metadata.get("failed_ids", []))
+
+    prosody_path = Path(config["path"].get("prosody_manifest_path", ""))
+    if not prosody_path.is_file():
+        raise SystemExit(
+            "Missing prosody manifest: {}. Run tools/build_prosody_manifest.py.".format(
+                prosody_path
+            )
+        )
+    with prosody_path.open(encoding="utf-8") as handle:
+        prosody_payload = json.load(handle)
+    if prosody_payload.get("format_version") != 1:
+        raise SystemExit("Unsupported prosody manifest format")
+    if prosody_payload.get("normalizer_version") != NORMALIZER_VERSION:
+        raise SystemExit("Prosody manifest was built with a different normalizer")
+    prosody_entries = prosody_payload.get("entries", {})
 
     wavs = {(p.parent.name, p.stem) for p in raw_root.rglob("*.wav")}
     labs = {(p.parent.name, p.stem) for p in raw_root.rglob("*.lab")}
@@ -79,6 +78,48 @@ def validate_alignment(config, allow_spn_words):
                 sorted(missing_grids)[:20],
                 sorted(grids - wavs)[:20],
             )
+        )
+    raw_ids = {uid for _, uid in wavs}
+    if set(prosody_entries) != raw_ids:
+        raise SystemExit(
+            "Prosody coverage mismatch: missing={} extra={}".format(
+                sorted(raw_ids - set(prosody_entries))[:20],
+                sorted(set(prosody_entries) - raw_ids)[:20],
+            )
+        )
+
+    source_punctuation = Counter()
+    punctuated_entries = 0
+    for speaker, uid in sorted(wavs):
+        entry = prosody_entries[uid]
+        lab_path = raw_root / speaker / (uid + ".lab")
+        lab_text = lab_path.read_text(encoding="utf-8").strip()
+        if entry.get("mfa_text") != lab_text:
+            raise SystemExit("Prosody/.lab mismatch for {}".format(uid))
+        pairs = prosody_words(entry.get("text", ""), expand_numbers=False)
+        actual_has_punctuation = any(token for _, token in pairs)
+        if bool(entry.get("has_punctuation")) != actual_has_punctuation:
+            raise SystemExit("Stale has_punctuation flag for {}".format(uid))
+        punctuated_entries += int(actual_has_punctuation)
+        normalized_words = " ".join(word for word, _ in pairs)
+        if normalized_words != lab_text:
+            raise SystemExit("Prosody normalization mismatch for {}".format(uid))
+        source_punctuation.update(token for _, token in pairs if token)
+    punctuated_ratio = punctuated_entries / len(prosody_entries)
+    prosody_config = config.get("prosody", {})
+    minimum_punctuated = float(
+        prosody_config.get("min_punctuated_utterance_ratio", 0)
+    )
+    missing_required = [
+        token
+        for token in prosody_config.get("required_tokens", [])
+        if source_punctuation[token] == 0
+    ]
+    if punctuated_ratio < minimum_punctuated or missing_required:
+        raise SystemExit(
+            "Prosody gate failed: punctuated_ratio={:.2%}, minimum={:.2%}, "
+            "missing_required={}. Build the sidecar from a genuinely punctuated "
+            "manifest.".format(punctuated_ratio, minimum_punctuated, missing_required)
         )
 
     expected_metadata = {
@@ -125,30 +166,57 @@ def validate_alignment(config, allow_spn_words):
         )
 
     allowed = set(PHONES)
+    def inspect_grid(path):
+        textgrid_text = path.read_text(encoding="utf-8", errors="replace")
+        phones = parse_tier(textgrid_text, "phones")
+        words = parse_tier(textgrid_text, "words")
+        uid = path.stem
+        aligned_words = [
+            interval.text.strip().lower()
+            for interval in words._objects
+            if interval.text.strip()
+        ]
+        expected_words = prosody_entries[uid]["mfa_text"].split()
+        if aligned_words != expected_words:
+            raise SystemExit(
+                "TextGrid word tier mismatch for {}: aligned={!r} expected={!r}".format(
+                    uid, aligned_words, expected_words
+                )
+            )
+        file_observed = Counter()
+        file_spn_words = Counter()
+        file_blank_intervals = 0
+        internal_pause = False
+        for index, interval in enumerate(phones._objects):
+            start, end, label = interval.start_time, interval.end_time, interval.text
+            phone = unicodedata.normalize("NFC", label.strip())
+            if not phone:
+                file_blank_intervals += 1
+                phone = "sp"
+                if index not in {0, len(phones._objects) - 1}:
+                    internal_pause = True
+            elif phone == "sil":
+                phone = "sp"
+            file_observed[phone] += 1
+            if phone == "spn":
+                word = interval_word(words, (start + end) / 2)
+                if word and word not in {"<unk>", "[noise]", "[laughter]"}:
+                    file_spn_words[word] += 1
+        return file_observed, file_spn_words, file_blank_intervals, int(internal_pause)
+
     observed = Counter()
     spn_words = Counter()
     blank_intervals = 0
     files_with_internal_pause = 0
-    for path in sorted(grid_root.rglob("*.TextGrid")):
-        textgrid_text = path.read_text(encoding="utf-8", errors="replace")
-        phones = parse_tier(textgrid_text, "phones")
-        words = parse_tier(textgrid_text, "words")
-        internal_pause = False
-        for index, (start, end, label) in enumerate(phones):
-            phone = unicodedata.normalize("NFC", label.strip())
-            if not phone:
-                blank_intervals += 1
-                phone = "sp"
-                if index not in {0, len(phones) - 1}:
-                    internal_pause = True
-            elif phone == "sil":
-                phone = "sp"
-            observed[phone] += 1
-            if phone == "spn":
-                word = interval_word(words, (start + end) / 2)
-                if word and word not in {"<unk>", "[noise]", "[laughter]"}:
-                    spn_words[word] += 1
-        files_with_internal_pause += int(internal_pause)
+    grid_paths = sorted(grid_root.rglob("*.TextGrid"))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+        for file_observed, file_spn, file_blanks, file_internal in executor.map(
+            inspect_grid, grid_paths
+        ):
+            observed.update(file_observed)
+            spn_words.update(file_spn)
+            blank_intervals += file_blanks
+            files_with_internal_pause += file_internal
 
     unknown = sorted(set(observed) - allowed)
     if unknown:
@@ -161,6 +229,20 @@ def validate_alignment(config, allow_spn_words):
             )
         )
 
+    validation_marker = {
+        "format_version": 1,
+        "inventory_version": INVENTORY_VERSION,
+        "wav_count": len(wavs),
+        "textgrid_count": len(grids),
+        "prosody_manifest_sha256": hashlib.sha256(prosody_path.read_bytes()).hexdigest(),
+        "alignment_run_sha256": hashlib.sha256(run_metadata_path.read_bytes()).hexdigest(),
+        "dictionary_sha256": dictionary_sha256,
+    }
+    (grid_root / "alignment_validation.json").write_text(
+        json.dumps(validation_marker, ensure_ascii=False, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+
     print("[PASS] alignment coverage:", len(wavs))
     print("[PASS] alignment metadata and runtime dictionary match")
     print("Explicit MFA export failures excluded:", len(failed_ids))
@@ -168,6 +250,10 @@ def validate_alignment(config, allow_spn_words):
     print("Blank MFA intervals mapped to sp:", blank_intervals)
     print("Files with internal pause:", files_with_internal_pause)
     print("Lexical spn intervals:", total_spn_words)
+    print("[PASS] prosody manifest coverage:", len(prosody_entries))
+    print("Source punctuation:", dict(source_punctuation))
+    if not source_punctuation:
+        print("WARNING: source transcripts contain no punctuation; only wb/sp can be learned.")
 
 
 def metadata_rows(path):
@@ -183,6 +269,7 @@ def validate_preprocessed(config):
     root = Path(config["path"]["preprocessed_path"])
     checked = 0
     metadata_ids = set()
+    control_counts = Counter()
     for split in ("train.txt", "val.txt"):
         path = root / split
         if not path.is_file():
@@ -196,6 +283,11 @@ def validate_preprocessed(config):
                 phone_text,
                 config["preprocessing"]["text"]["text_cleaners"],
             )
+            if not (phone_text.startswith("{") and phone_text.endswith("}")):
+                raise SystemExit("{} is not a strict braced token sequence".format(basename))
+            tokens = phone_text[1:-1].split()
+            if len(tokens) != len(ids):
+                raise SystemExit("{} token/id length mismatch".format(basename))
             duration = np.load(root / "duration" / "{}-duration-{}.npy".format(speaker, basename))
             pitch = np.load(root / "pitch" / "{}-pitch-{}.npy".format(speaker, basename))
             energy = np.load(root / "energy" / "{}-energy-{}.npy".format(speaker, basename))
@@ -215,6 +307,13 @@ def validate_preprocessed(config):
                         basename, int(np.sum(duration)), mel.shape[0]
                     )
                 )
+            for index, token in enumerate(tokens):
+                if token in CONTROL_TOKENS:
+                    control_counts[token] += 1
+                if token == WORD_BOUNDARY_TOKEN and int(duration[index]) != 0:
+                    raise SystemExit("{} has nonzero wb duration".format(basename))
+                if token in PUNCTUATION_TOKENS and int(duration[index]) < 0:
+                    raise SystemExit("{} has negative punctuation duration".format(basename))
             for name, values in (("pitch", pitch), ("energy", energy), ("mel", mel)):
                 if not np.all(np.isfinite(values)):
                     raise SystemExit("{} contains non-finite {}".format(basename, name))
@@ -223,6 +322,26 @@ def validate_preprocessed(config):
     for required in ("speakers.json", "stats.json"):
         with open(root / required, encoding="utf-8") as handle:
             json.load(handle)
+    abi_path = root / "linguistic_abi.json"
+    if not abi_path.is_file():
+        raise SystemExit("Missing {}; features use the old ABI".format(abi_path))
+    with abi_path.open(encoding="utf-8") as handle:
+        abi = json.load(handle)
+    expected_abi = {
+        "inventory_version": INVENTORY_VERSION,
+        "normalizer_version": NORMALIZER_VERSION,
+        "prosody_manifest_sha256": hashlib.sha256(
+            Path(config["path"]["prosody_manifest_path"]).read_bytes()
+        ).hexdigest(),
+        "utterance_count": checked,
+        "control_counts": dict(control_counts),
+    }
+    if abi != expected_abi:
+        raise SystemExit(
+            "Linguistic ABI metadata mismatch: file={} actual={}".format(
+                abi, expected_abi
+            )
+        )
     feature_report_path = root / "feature_extraction_report.json"
     if not feature_report_path.is_file():
         raise SystemExit("Missing {}".format(feature_report_path))
@@ -260,6 +379,9 @@ def validate_preprocessed(config):
         )
     print("[PASS] preprocessed utterances:", checked)
     print("Feature extraction rejections:", feature_report["rejected_count"])
+    print("Linguistic controls:", dict(control_counts))
+    if not control_counts[WORD_BOUNDARY_TOKEN]:
+        raise SystemExit("No word-boundary tokens found; features use the old ABI")
 
 
 def main():
