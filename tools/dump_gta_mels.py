@@ -21,6 +21,10 @@ Example (Colab, features + ckpt on Drive):
 
 import argparse
 import os
+import sys
+
+# Repo-root modules (dataset, utils, model) live one level up from tools/.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import numpy as np
 import torch
