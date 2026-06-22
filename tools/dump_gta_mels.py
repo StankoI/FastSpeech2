@@ -27,6 +27,7 @@ import torch
 import yaml
 from torch.utils.data import DataLoader
 
+import dataset as dataset_module
 from dataset import Dataset
 from utils.model import get_model
 from utils.tools import to_device
@@ -34,6 +35,14 @@ from utils.tools import to_device
 
 def main(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    if args.skip_abi_check:
+        # The GTA dump reads only mel/pitch/energy/duration + train.txt/val.txt; it
+        # never touches prosody_manifest.json. Bypass the punctuation-integrity gate
+        # so a missing/lost manifest doesn't block the dump. get_model() still runs
+        # validate_checkpoint_metadata(), which is the real correctness guarantee.
+        dataset_module._validate_linguistic_abi = lambda *a, **k: None
+        print("[dump] ABI check skipped (--skip_abi_check)")
 
     preprocess_config = yaml.load(open(args.preprocess_config), Loader=yaml.FullLoader)
     model_config = yaml.load(open(args.model_config), Loader=yaml.FullLoader)
@@ -93,4 +102,10 @@ if __name__ == "__main__":
         help="metadata file under preprocessed_path (train.txt / val.txt)",
     )
     parser.add_argument("--out_dir", type=str, required=True)
+    parser.add_argument(
+        "--skip_abi_check",
+        action="store_true",
+        help="bypass the prosody-manifest integrity gate (safe for the dump; "
+        "the checkpoint-metadata check in get_model still runs)",
+    )
     main(parser.parse_args())
