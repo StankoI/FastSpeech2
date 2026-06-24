@@ -262,6 +262,15 @@ if __name__ == "__main__":
         help="raw text to synthesize, for single-sentence mode only",
     )
     parser.add_argument(
+        "--output_id",
+        type=str,
+        default=None,
+        help=(
+            "output basename for single-sentence mode; defaults to the first "
+            "100 characters of --text"
+        ),
+    )
+    parser.add_argument(
         "--speaker_id",
         type=int,
         default=0,
@@ -350,7 +359,9 @@ if __name__ == "__main__":
             collate_fn=dataset.collate_fn,
         )
     if args.mode == "single":
-        ids = raw_texts = [args.text[:100]]
+        output_id = args.output_id or args.text[:100]
+        ids = [output_id]
+        raw_texts = [args.text]
         speakers = np.array([args.speaker_id])
         if preprocess_config["preprocessing"]["text"]["language"] == "bg":
             texts = np.array([
