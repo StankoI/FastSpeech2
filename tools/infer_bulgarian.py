@@ -19,10 +19,15 @@ import tempfile
 from datetime import datetime
 import zipfile
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+import torch
 import yaml
 
-
-REPO_ROOT = Path(__file__).resolve().parents[1]
+from bg_text_normalizer import normalize as contextual_normalize
+from bulgarian_normalization import normalize_with_punctuation
 
 
 def _checkpoint_step(path: Path) -> int | None:
@@ -57,18 +62,94 @@ def _read_text(args: argparse.Namespace) -> str:
     return args.text.strip()
 
 
-def _ensure_vocoder(root: Path) -> None:
-    extracted = root / "hifigan" / "generator_universal.pth.tar"
+def _normalize_text_for_inference(text: str, mode: str) -> str:
+    """Normalize raw Bulgarian before the MFA-phone synthesis path.
+
+    ``synthesize.py`` still performs the final punctuation/phone normalization.
+    This step expands contextual constructs such as dates, currencies,
+    measurements, ordinals, phones and common abbreviations before that final
+    pass. Already-phonemized ``{...}`` input is intentionally left untouched.
+    """
+    if text.startswith("{") and text.endswith("}"):
+        return text
+
+    mode = mode.lower().strip()
+    if mode == "none":
+        return text
+    if mode == "legacy":
+        return normalize_with_punctuation(text)
+    if mode == "contextual":
+        return normalize_with_punctuation(contextual_normalize(text))
+    raise ValueError("--text-normalizer must be 'contextual', 'legacy', or 'none'")
+
+
+def _validate_generator_checkpoint(path: Path) -> None:
+    checkpoint = torch.load(path, map_location="cpu", weights_only=False)
+    if not isinstance(checkpoint, dict) or "generator" not in checkpoint:
+        keys = list(checkpoint.keys())[:30] if isinstance(checkpoint, dict) else type(checkpoint).__name__
+        raise ValueError(
+            f"{path} is not a HiFi-GAN generator checkpoint. Expected key "
+            f"'generator', got keys/type: {keys}. For inference use g_..., not do_..."
+        )
+
+
+def _extract_default_vocoder(root: Path) -> Path:
+    target = root / "hifigan" / "generator_universal.default.pth.tar"
     archive = root / "hifigan" / "generator_universal.pth.tar.zip"
-    if extracted.is_file():
-        return
+    if target.is_file():
+        return target
     if not archive.is_file():
         raise FileNotFoundError(
-            "Missing HiFi-GAN checkpoint. Expected either "
-            f"{extracted} or {archive}."
+            f"Missing default HiFi-GAN archive: {archive}. Either keep the repo "
+            "archive, or pass --vocoder-mode finetuned with --finetuned-vocoder."
         )
     with zipfile.ZipFile(archive) as zf:
-        zf.extractall(root / "hifigan")
+        member = next(
+            (
+                name
+                for name in zf.namelist()
+                if name.endswith("generator_universal.pth.tar")
+            ),
+            None,
+        )
+        if member is None:
+            raise FileNotFoundError(
+                f"{archive} does not contain generator_universal.pth.tar"
+            )
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with zf.open(member) as source, open(target, "wb") as destination:
+            shutil.copyfileobj(source, destination)
+    _validate_generator_checkpoint(target)
+    return target
+
+
+def _prepare_vocoder(root: Path, mode: str, finetuned_vocoder: str | None) -> Path:
+    runtime_path = root / "hifigan" / "generator_universal.pth.tar"
+    mode = mode.lower().strip()
+
+    if mode == "default":
+        default_path = _extract_default_vocoder(root)
+        shutil.copy2(default_path, runtime_path)
+        active_path = default_path
+    elif mode in {"finetuned", "custom"}:
+        if not finetuned_vocoder:
+            raise ValueError("--finetuned-vocoder is required for --vocoder-mode finetuned")
+        active_path = Path(finetuned_vocoder).expanduser()
+        if not active_path.is_absolute():
+            active_path = (root / active_path).resolve()
+        if not active_path.is_file():
+            raise FileNotFoundError(active_path)
+        _validate_generator_checkpoint(active_path)
+        runtime_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(active_path, runtime_path)
+    else:
+        raise ValueError("--vocoder-mode must be 'default' or 'finetuned'")
+
+    _validate_generator_checkpoint(runtime_path)
+    print(f"vocoder mode: {mode}")
+    print(f"vocoder source: {active_path}")
+    print(f"vocoder runtime: {runtime_path}")
+    return active_path
 
 
 def _resolve_checkpoint(
@@ -225,6 +306,27 @@ def parse_args() -> argparse.Namespace:
         help="Optional MAMBA_ROOT_PREFIX for micromamba-based MFA installs",
     )
     parser.add_argument("--runtime-lexicon", help="Override runtime lexicon path")
+    parser.add_argument(
+        "--text-normalizer",
+        default="contextual",
+        choices=["contextual", "legacy", "none"],
+        help=(
+            "Raw-text normalizer before phonemization. 'contextual' expands "
+            "dates/currency/measurements/ordinals/phones/abbreviations; "
+            "'legacy' uses the older number-only normalizer; 'none' passes "
+            "raw text to synthesize.py."
+        ),
+    )
+    parser.add_argument(
+        "--vocoder-mode",
+        default="default",
+        choices=["default", "finetuned", "custom"],
+        help="Use the repo universal HiFi-GAN or a fine-tuned generator checkpoint.",
+    )
+    parser.add_argument(
+        "--finetuned-vocoder",
+        help="Path to a HiFi-GAN generator checkpoint such as hifigan_finetune/g_00135000.",
+    )
     return parser.parse_args()
 
 
@@ -232,8 +334,9 @@ def main() -> None:
     args = parse_args()
     os.chdir(REPO_ROOT)
 
-    text = _read_text(args)
-    output_id = _safe_output_id(text, args.output_id)
+    original_text = _read_text(args)
+    text = _normalize_text_for_inference(original_text, args.text_normalizer)
+    output_id = _safe_output_id(original_text, args.output_id)
     result_dir = Path(args.result_dir).expanduser()
     if not result_dir.is_absolute():
         result_dir = (REPO_ROOT / result_dir).resolve()
@@ -248,7 +351,7 @@ def main() -> None:
     with open(train_config_path, encoding="utf-8") as handle:
         train_config = yaml.safe_load(handle)
 
-    _ensure_vocoder(REPO_ROOT)
+    _prepare_vocoder(REPO_ROOT, args.vocoder_mode, args.finetuned_vocoder)
     _check_inference_assets(preprocess_config, args.runtime_lexicon)
 
     step, checkpoint_path = _resolve_checkpoint(
@@ -297,6 +400,9 @@ def main() -> None:
         cmd.extend(["--runtime_lexicon", args.runtime_lexicon])
 
     print(f"checkpoint: {checkpoint_path}")
+    print(f"text normalizer: {args.text_normalizer}")
+    if text != original_text:
+        print(f"normalized text: {text}")
     print(f"output id:  {output_id}")
     print(f"result dir: {result_dir}")
 
