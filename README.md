@@ -12,6 +12,16 @@ runtime lexicon, MFA/G2P fallback for unknown words, explicit word-boundary and
 punctuation tokens, and a contextual text normalizer for numbers, dates,
 currencies, measurements, telephone numbers and common abbreviations.
 
+## Present The Model (Demo Notebook)
+
+The quickest way to hear the model is the self-contained demo notebook
+[`notebooks/Bulgarian_TTS_Demo.ipynb`](notebooks/Bulgarian_TTS_Demo.ipynb). It
+walks the full pipeline explicitly — **text → phonemes → FastSpeech 2 →
+fine-tuned HiFi-GAN → audio** — loading the latest phoneme checkpoint and the
+fine-tuned vocoder, then playing the synthesized speech inline. Open it and run
+the cells top to bottom; edit the `TEXT` and control variables in the
+configuration cell to try other sentences.
+
 ## Quick Demo Through The Inference Notebook
 
 Use this path when you only want to synthesize speech from an already trained
@@ -51,7 +61,7 @@ hifigan/generator_universal.pth.tar.zip
 Optional but recommended:
 
 ```text
-hifigan_finetune/g_00135000
+hifigan_finetune/g_00080000
 local_assets/phoneme_assets.zip
 local_assets/preprocessed_Bulgarian_prosody_v2.zip
 ```
@@ -92,8 +102,8 @@ run_inference("finetuned", text)
 ```
 
 for the Bulgarian fine-tuned generator. The fine-tuned vocoder should point to a
-generator checkpoint named like `g_00135000`, not a discriminator checkpoint
-named like `do_00135000`.
+generator checkpoint named like `g_00080000`, not a discriminator checkpoint
+named like `do_00080000`.
 
 The main controls are:
 
@@ -157,7 +167,7 @@ output_prosody_v2/ckpt/Bulgarian/*.pth.tar
 Optional for better sound quality:
 
 ```text
-hifigan_finetune/g_00135000
+hifigan_finetune/g_00080000
 ```
 
 Run the Colab notebook top to bottom once. Afterwards, to synthesize another
@@ -180,7 +190,7 @@ python tools/infer_bulgarian.py \
   --duration-control 1.15 \
   --text-normalizer contextual \
   --vocoder-mode finetuned \
-  --finetuned-vocoder hifigan_finetune/g_00135000
+  --finetuned-vocoder hifigan_finetune/g_00080000
 ```
 
 For the universal vocoder, replace the last two arguments with:
@@ -218,6 +228,7 @@ tools/infer_bulgarian.py       CLI wrapper used by the inference notebooks
 tools/run_mfa_alignment.py     Resumable MFA alignment runner
 tools/package_for_colab.py     Archives assets for Colab training/inference
 config/Bulgarian/              FastSpeech 2 Bulgarian configs
+notebooks/Bulgarian_TTS_Demo.ipynb            One-stop demo: text -> phonemes -> FS2 -> HiFi-GAN -> audio
 notebooks/                     Local demo/inference notebooks
 colab/                         Colab training and inference notebooks
 hifigan/                       HiFi-GAN code and bundled universal checkpoint zip

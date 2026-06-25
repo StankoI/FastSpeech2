@@ -140,3 +140,15 @@ filelists
 /mfa_phone_export/
 /mfa_corpus/
 /lexicon/bulgarian_mfa_runtime.dict
+
+# Local inference assets and outputs (large/local; restored from local_assets zips or Colab)
+/hifigan_finetune/
+/local_assets/
+/local_inference_results/
+/preprocessed_data/
+/preprocessed_data2/
+/local/
+/mfa_local_out/
+/mfa_train/
+/mfa_chunk/
+/mfa_chunk_out/
